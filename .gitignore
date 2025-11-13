@@ -1,0 +1,6 @@
+.idea/
+CLAUDE.md
+__pycache__/
+logs/
+models/
+results/

@@ -1,9 +1,10 @@
 #!/usr/bin/python2.7
 # adapted from: https://github.com/colincsl/TemporalConvolutionalNetworks/blob/master/code/metrics.py
+import os
 
 import numpy as np
 import argparse
-
+from data_utils import *
 
 def read_file(path):
     with open(path, 'r') as f:
@@ -36,7 +37,7 @@ def get_labels_start_end_time(frame_wise_labels, bg_class=["background"]):
 def levenstein(p, y, norm=False):
     m_row = len(p)
     n_col = len(y)
-    D = np.zeros([m_row+1, n_col+1], np.float)
+    D = np.zeros([m_row+1, n_col+1], float)
     for i in range(m_row+1):
         D[i, 0] = i
     for i in range(n_col+1):
@@ -90,59 +91,109 @@ def f_score(recognized, ground_truth, overlap, bg_class=["background"]):
     return float(tp), float(fp), float(fn)
 
 
+label2idx = {
+    "walk": 0,
+    "fall": 1,
+    "fallen": 2,
+    "sit_down": 3,
+    "sitting": 4,
+    "lie_down": 5,
+    "lying": 6,
+    "stand_up": 7,
+    "standing": 8,
+    "other": 9,
+}
+
+idx2label = {v: k for k, v in label2idx.items()}
+
+
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--dataset', default="gtea")
+    parser.add_argument('--dataset', default="breakfast")
     parser.add_argument('--split', default='1')
+    parser.add_argument('--target_fps', default='10', type=int)
 
     args = parser.parse_args()
 
-    ground_truth_path = "./data/"+args.dataset+"/groundTruth/"
-    recog_path = "./results/"+args.dataset+"/split_"+args.split+"/"
-    file_list = "./data/"+args.dataset+"/splits/test.split"+args.split+".bundle"
+    dataset_root = "/pfs/work8/workspace/ffhk/scratch/kf3609-ws/data/omnifall"
 
-    list_of_videos = read_file(file_list).split('\n')[:-1]
+    ground_truth_path = os.path.join(dataset_root, "segmentation_annotations", "labels", "full.csv")
+    recog_path = "./results/"+args.dataset+"/split_"+args.split+"/"
+    file_list = os.path.join(dataset_root, "segmentation_annotations", "splits", "test_cs.csv")
+
+    df = pd.read_csv(file_list)
+    first_column_name = df.columns[0]
+    list_of_videos = df[first_column_name].tolist()
+    list_of_videos = [i for i in list_of_videos if i not in excluded_samples]
+
+    gts_segments = load_temporal_labels(ground_truth_path)
 
     overlap = [.1, .25, .5]
-    tp, fp, fn = np.zeros(3), np.zeros(3), np.zeros(3)
 
-    correct = 0
-    total = 0
-    edit = 0
+    test_list = [
+        "all",
+        "caucafall",
+        "cmdfall",
+        "edf",
+        "gmdcsa24",
+        "le2i",
+        "mcfd",
+        "occu",
+        "up_fall",
+        "OOPS",  # only for test!
+    ]
 
-    for vid in list_of_videos:
-        gt_file = ground_truth_path + vid
-        gt_content = read_file(gt_file).split('\n')[0:-1]
+    for subset in test_list:
+        print("#####Evaluating subset: {}".format(subset))
+        if subset == "all":
+            list_of_videos_subset = list_of_videos
+        else:
+            list_of_videos_subset = [i for i in list_of_videos if subset in i]
 
-        recog_file = recog_path + vid.split('.')[0]
-        recog_content = read_file(recog_file).split('\n')[1].split()
+        if len(list_of_videos_subset) == 0:
+            print("No videos for subset {}. Skipping.".format(subset))
+            continue
 
-        for i in range(len(gt_content)):
-            total += 1
-            if gt_content[i] == recog_content[i]:
-                correct += 1
+        tp, fp, fn = np.zeros(3), np.zeros(3), np.zeros(3)
 
-        edit += edit_score(recog_content, gt_content)
+        correct = 0
+        total = 0
+        edit = 0
 
+        for vid in list_of_videos_subset:
+            recog_file = recog_path + vid.split('/')[-1].split('.')[0]
+            recog_content = read_file(recog_file).split('\n')[1].split()
+
+            # Prepare labels
+            num_frames = len(recog_content)
+            gt_segments = gts_segments[vid]
+            gt = convert_segments_to_segmentations(gt_segments, num_frames, fps=args.target_fps, default_class_id=9)
+            gt_content = [idx2label[i] for i in gt]
+
+            for i in range(len(gt_content)):
+                total += 1
+                if gt_content[i] == recog_content[i]:
+                    correct += 1
+
+            edit += edit_score(recog_content, gt_content)
+
+            for s in range(len(overlap)):
+                tp1, fp1, fn1 = f_score(recog_content, gt_content, overlap[s])
+                tp[s] += tp1
+                fp[s] += fp1
+                fn[s] += fn1
+
+        print("Acc: %.4f" % (100*float(correct)/total))
+        print('Edit: %.4f' % ((1.0*edit)/len(list_of_videos_subset)))
         for s in range(len(overlap)):
-            tp1, fp1, fn1 = f_score(recog_content, gt_content, overlap[s])
-            tp[s] += tp1
-            fp[s] += fp1
-            fn[s] += fn1
+            precision = tp[s] / float(tp[s]+fp[s])
+            recall = tp[s] / float(tp[s]+fn[s])
 
-    print("Acc: %.4f" % (100*float(correct)/total))
-    print('Edit: %.4f' % ((1.0*edit)/len(list_of_videos)))
-    acc = (100*float(correct)/total)
-    edit = ((1.0*edit)/len(list_of_videos))
-    for s in range(len(overlap)):
-        precision = tp[s] / float(tp[s]+fp[s])
-        recall = tp[s] / float(tp[s]+fn[s])
+            f1 = 2.0 * (precision*recall) / (precision+recall)
 
-        f1 = 2.0 * (precision*recall) / (precision+recall)
-
-        f1 = np.nan_to_num(f1)*100
-        print('F1@%0.2f: %.4f' % (overlap[s], f1))
+            f1 = np.nan_to_num(f1)*100
+            print('F1@%0.2f: %.4f' % (overlap[s], f1))
 
 if __name__ == '__main__':
     main()

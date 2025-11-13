@@ -8,10 +8,12 @@ from torch import optim
 import copy
 import numpy as np
 from loguru import logger
+import os
+from data_utils import *
 
 
 class MS_TCN2(nn.Module):
-MS_TCB    def __init__(self, num_layers_PG, num_layers_R, num_R, num_f_maps, dim, num_classes):
+    def __init__(self, num_layers_PG, num_layers_R, num_R, num_f_maps, dim, num_classes):
         super(MS_TCN2, self).__init__()
         self.PG = Prediction_Generation(num_layers_PG, num_f_maps, dim, num_classes)
         self.Rs = nn.ModuleList([copy.deepcopy(Refinement(num_layers_R, num_f_maps, num_classes, num_classes)) for s in range(num_R)])
@@ -168,18 +170,28 @@ class Trainer:
             logger.info("[epoch %d]: epoch loss = %f,   acc = %f" % (epoch + 1, epoch_loss / len(batch_gen.list_of_examples),
                                                                float(correct)/total))
 
-    def predict(self, model_dir, results_dir, features_path, vid_list_file, epoch, actions_dict, device, sample_rate):
+    def predict(self, model_dir, results_dir, features_path, vid_list_file, epoch, actions_dict, device, target_fps):
         self.model.eval()
         with torch.no_grad():
             self.model.to(device)
             self.model.load_state_dict(torch.load(model_dir + "/epoch-" + str(epoch) + ".model"))
-            file_ptr = open(vid_list_file, 'r')
-            list_of_vids = file_ptr.read().split('\n')[:-1]
-            file_ptr.close()
+            df = pd.read_csv(vid_list_file)
+            first_column_name = df.columns[0]
+            list_of_vids = df[first_column_name].tolist()
+            list_of_vids = [i for i in list_of_vids if i not in excluded_samples]
+
             for vid in list_of_vids:
                 #print vid
-                features = np.load(features_path + vid.split('.')[0] + '.npy')
-                features = features[:, ::sample_rate]
+                tmp = vid.split('/')
+                feature_path = '/'.join([tmp[0], 'features', 'i3d'] + tmp[1:]) + '.h5'
+                feature_path = os.path.join(features_path, feature_path)
+                try:
+                    features = load_feature(feature_path)
+                except:
+                    raise ValueError("Error loading feature file: {}".format(feature_path))
+                fps = get_fps(vid)
+                features = subsample(features, original_fps=fps, target_fps=target_fps)
+                features = np.transpose(features)
                 input_x = torch.tensor(features, dtype=torch.float)
                 input_x.unsqueeze_(0)
                 input_x = input_x.to(device)
@@ -188,7 +200,7 @@ class Trainer:
                 predicted = predicted.squeeze()
                 recognition = []
                 for i in range(len(predicted)):
-                    recognition = np.concatenate((recognition, [list(actions_dict.keys())[list(actions_dict.values()).index(predicted[i].item())]]*sample_rate))
+                    recognition = np.concatenate((recognition, [list(actions_dict.keys())[list(actions_dict.values()).index(predicted[i].item())]]))
                 f_name = vid.split('/')[-1].split('.')[0]
                 f_ptr = open(results_dir + "/" + f_name, "w")
                 f_ptr.write("### Frame level recognition: ###\n")
